@@ -1,0 +1,10 @@
+# Reason code -> responsible party (FEASIBILITY.md §06 "Phase 4 -
+# operational intelligence"). Data, not engine logic - add a rule to
+# exceptions/evaluator.py, then add its routing here.
+
+contradiction_detected: logistics
+vessel_swap_near_arrival: logistics
+rail_expected_missing: warehouse
+stalled: logistics
+container_not_found: logistics
+unclassified_events_present: data_quality_review

@@ -1,0 +1,20 @@
+# Real shipment/business data - not for version control
+1RAW.xlsx
+Tracking_Report_*.xlsx
+SIPL_filtered_*.xlsx
+msc_scraped_results_*.xlsx
+merged_validation_output_*.xlsx
+MSC_NonRail_Final_Working_*.xlsx
+OLD/
+HL Tracking/
+tracking_control_tower/data/*.db
+tracking_control_tower/tests/dashboard_data.json
+
+# Local tooling / IDE state
+.claude/
+.spyproject/
+__pycache__/
+*.pyc
+
+# Original project-brief doc, not part of this repo's scope
+prompt.txt

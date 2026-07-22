@@ -1,0 +1,194 @@
+# Event taxonomy — seeded from real historical vocabulary.
+#
+# Sources:
+#   - 216 historical OLD/msc_scraped_results_*.xlsx files (107,927 description values)
+#   - 38 historical HL Tracking/old/HL_Parsed_*.xlsx files (Status column)
+#
+# Phrases are matched AFTER normalizer.py strips a leading empty/full/laden
+# qualifier, so e.g. "Full Transshipment Discharged" is matched here as
+# "transshipment discharged". phase_rank follows the canonical timeline in
+# ARCHITECTURE.md (00 Booking ... 12 Delivered); categories with
+# is_projection: true are ETA/ETD estimates, not confirmed milestones, and
+# must not advance phase_rank on their own.
+#
+# Known ambiguity: "received at cy" is used both for export pickup (rank 1,
+# dominant case) and for post-delivery empty container return. The
+# classifier cannot disambiguate this from text alone - see shipment_state
+# design in ARCHITECTURE.md for how sequence context resolves it.
+
+categories:
+  gate_movement:
+    phase_rank: 1
+    phrases:
+      - "gate out empty"
+      - "gate in empty"
+
+  export_received:
+    phase_rank: 1
+    phrases:
+      - "export received at cy"
+      - "export received at origin rail ramp"
+      - "export stuffed"
+      - "stuffed"  # HL's current SPA - bare form of "export stuffed", confirmed via live Step 0 trial 2026-07-13
+      - "carrier release"
+      - "received at cy"
+      # Pre-carriage rail moves (origin -> port), NOT the post-discharge
+      # "import" rail phrases below - textually near-identical to their
+      # import counterparts (rapidfuzz token_sort_ratio ~90-95%), which
+      # silently conflated them via the fuzzy fallback until this was
+      # caught by a real contradiction (AMFU3228507: rail events dated
+      # BEFORE "Export Loaded on Vessel", not after discharge). Listed
+      # explicitly here so exact/prefix match wins before fuzzy ever runs.
+      - "export loaded on rail"
+      - "export unloaded from rail"
+      - "export arrived at destination rail ramp"
+      # MSC's current site, confirmed via 4 real containers flagged in
+      # the Exceptions sheet 2026-07-16 (XHCU2466631, TGBU1344515,
+      # MSDU2447472, MSDU1284560) - same "start of the export cycle"
+      # meaning as the other phrases in this category, just a different
+      # wording MSC uses for some containers' first event.
+      - "start export cycle"
+
+  positioning:
+    phase_rank: 1
+    phrases:
+      - "export positioning in"
+      - "export positioning out"
+      - "export returned empty"
+      - "export back from shipper"
+      - "export return to shipper"
+      - "import positioning in"
+      - "import positioning out"
+
+  inland_leg_arrival:
+    phase_rank: 1
+    phrases:
+      - "arrival in"
+      # "Gated in" - HL's current SPA (solutions/tracking/#/), confirmed
+      # via live capture 2026-07-13. Different wording from the legacy
+      # tracking form's "Arrival in" (see FEASIBILITY.md: the legacy
+      # form is retired). Same semantic category and same
+      # pre-/post-discharge ambiguity - shipment_state/engine.py's
+      # contextual rank promotion already covers this category, so
+      # adding the phrase here is the only change needed.
+      - "gated in"
+      - "gate in"  # Maersk's current site (no "-ed"), confirmed via live capture 2026-07-13.
+      # Was already fuzzy-matching "gated in" at ~93% - just under a
+      # comfortable margin above FUZZY_THRESHOLD (92%). Added explicitly
+      # rather than relying on that margin, consistent with how the
+      # export/import-rail fuzzy false-positive was fixed earlier.
+
+  inland_leg_departure:
+    phase_rank: 1
+    phrases:
+      - "departure from"
+      - "gated out"  # HL current SPA - see inland_leg_arrival note above
+      - "gate out"  # Maersk's current site - see the "gate in" note above
+
+  loaded_on_vessel:
+    phase_rank: 2
+    phrases:
+      - "export loaded on vessel"
+      - "loaded"
+      - "loading"
+      - "load on"  # Maersk's current site, confirmed via live capture 2026-07-13: "Load on <vessel>"
+
+  vessel_departed:
+    phase_rank: 3
+    phrases:
+      - "vessel departed"
+      - "vessel departure"
+      # Maersk's current site, confirmed via live capture 2026-07-15: a
+      # smaller connecting vessel used for a transshipment leg, not the
+      # main-line vessel - same "a vessel with this container departed"
+      # meaning as "Vessel departure", just qualified as a feeder rather
+      # than the through vessel. Real container MRKU9596846 had this
+      # unclassified, and multi-leg transshipment already tolerates
+      # rank 3 recurring per leg (see shipment_state/engine.py), so
+      # there's no reason to model it as a separate category.
+      - "feeder departure"
+
+  estimated_departure:
+    phase_rank: null
+    is_projection: true
+    phrases:
+      - "estimated time of departure"
+
+  transshipment:
+    phase_rank: 4
+    phrases:
+      - "transshipment discharged"
+      - "transshipment loaded"
+      - "intended transshipment"
+      - "transshipment positioned out"
+      - "transshipment positioned in"
+
+  estimated_arrival:
+    phase_rank: null
+    is_projection: true
+    phrases:
+      - "estimated time of arrival"
+      - "estimated to arrive at ramp"
+
+  arrived_at_port:
+    phase_rank: 6
+    phrases:
+      - "vessel arrival"
+      - "vessel arrived"
+      # See "feeder departure" above - same feeder-vessel qualifier,
+      # same underlying meaning as "Vessel arrival".
+      - "feeder arrival"
+
+  discharged:
+    phase_rank: 7
+    phrases:
+      - "import discharged from vessel"
+      - "discharge"
+      - "discharged"
+
+  rail_loaded:
+    phase_rank: 9
+    phrases:
+      - "import loaded on rail"
+      - "import loaded on barge"
+
+  rail_departure:
+    phase_rank: 9
+    phrases:
+      - "import rail departure"
+
+  rail_arrival:
+    phase_rank: 9
+    phrases:
+      - "import unloaded from rail"
+      - "import arrived at destination rail ramp"
+
+  available_for_delivery:
+    phase_rank: 10
+    phrases:
+      - "available for delivery"
+
+  delivered_to_consignee:
+    phase_rank: 12
+    phrases:
+      - "import to consignee"
+
+  # NOTE: real MSC data (found via shipment_state engine testing, not
+  # guessed) shows "Empty to Shipper" occurring BEFORE "Export received
+  # at CY" - it's the carrier releasing an empty container to the
+  # shipper for stuffing, i.e. the start of the export cycle, not an
+  # end-of-cycle empty return as the phrase might suggest in isolation.
+  empty_released_to_shipper:
+    phase_rank: 1
+    phrases:
+      - "to shipper"
+
+  administrative_alert:
+    phase_rank: null
+    phrases:
+      - "free time to expire"
+
+  container_load_status_marker:
+    phase_rank: null
+    phrases:
+      - "laden"

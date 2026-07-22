@@ -1,0 +1,17 @@
+# Exception engine thresholds - tunable without touching evaluator.py.
+#
+# stalled_days: derived from real data, not guessed. Computed the gap in
+# days between every pair of consecutive dated events for every
+# container across the fullest available historical snapshot in each
+# carrier's archive (HL: 204 gaps, MSC: 121 gaps). p90-p95 landed at
+# 29-35 days for both carriers - consistent with real observed
+# ocean-transit legs (21-45 days). 35 days flags the slowest ~5% of
+# real transitions without false-triggering on a normal long leg.
+stalled_days: 35
+
+# Grace period after reaching "Discharged" (rank 7) before flagging a
+# rail-served shipment that hasn't shown a rail event yet. Not derived
+# from real data the way stalled_days is - no real example in the
+# historical archive shows rail arriving late, so this is a starting
+# point to tune once live data exists, not a validated figure.
+rail_missing_grace_days: 10

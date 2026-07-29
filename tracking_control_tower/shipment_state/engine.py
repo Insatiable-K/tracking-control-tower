@@ -52,6 +52,34 @@ testing against real data rather than the original architecture sketch:
    promoted post-discharge inland moves). Any "discharged" event after
    the final anchor is promoted the same way inland-leg events are -
    it's further post-discharge activity, not a second vessel discharge.
+
+6. current_eta/current_vessel for Maersk containers come from a
+   carrier-marked FUTURE milestone, not just MSC-style is_projection
+   events. Maersk has no "Estimated Time of Arrival" phrase at all -
+   instead its own DOM tags the final destination-port "Vessel arrival"
+   row data-test="transport-plan-item-future" (see carriers/maersk.py),
+   confirmed live 2026-07-29 to reliably carry the real assigned vessel
+   and predicted date, unlike HL's future-dated schedule rows (excluded
+   entirely, see _is_future below) which carry no such marker and were
+   found internally inconsistent. Without this, Maersk containers'
+   current_eta/current_vessel silently fell back to the latest CONFIRMED
+   event - i.e. wherever the container currently sits mid-transshipment -
+   instead of the actual US arrival vessel/ETA, which is what SPS
+   comparisons (comparison/sps_diff.py) and the report actually need.
+
+7. current_vessel's fallback ("whatever's on the latest confirmed
+   event") must skip events whose vessel_info isn't actually a vessel
+   name. Real containers found live 2026-07-29: MSC's SEGU2963797
+   (already delivered) had "Full Available for Delivery" - vessel_info
+   'LADEN', a container-state marker, not a vessel - as its latest
+   confirmed event; HL's HLXU3569327 (sitting at destination) had
+   "Gated in" - vessel_info 'Truck', HL's mode-of-transport label for
+   inland moves - as its latest. Both reported that placeholder as
+   current_vessel instead of the real last vessel (MSC LETIZIA MC624A /
+   HUI FA 2622W respectively) sitting a few events earlier in the same
+   confirmed history. NON_VESSEL_VESSEL_INFO + _real_vessel() search
+   backward past any such placeholder for the most recent event that
+   actually names one.
 """
 from tracking_control_tower.events.classifier import UNCLASSIFIED
 from tracking_control_tower.shipment_state.models import ClassifiedEvent, ShipmentState
@@ -63,12 +91,30 @@ from tracking_control_tower.shipment_state.timeline import (
 )
 
 DELIVERY_ZONE_RANKS = {10, 11}
+# Not real vessel names - MSC's vessel_info column carries these as
+# container-state markers on non-vessel events (export_received,
+# available_for_delivery, ...), and HL's carries "Truck"/"Rail" as its
+# mode-of-transport label on inland-leg events. Lowercased for
+# case-insensitive comparison.
+NON_VESSEL_VESSEL_INFO = {"laden", "empty", "truck", "rail", "n.a", "n/a", "na"}
 # "discharged" is included here too: HL's current SPA reuses the word
 # for a later rail-ramp unload, not just the original vessel discharge
 # (point 5 above) - only the FIRST (anchor) occurrence keeps rank 7.
 AMBIGUOUS_INLAND_CATEGORIES = {"inland_leg_arrival", "inland_leg_departure", "discharged"}
 POST_DISCHARGE_INLAND_RANK = 10
 POST_DELIVERY_RETURN_RANK = 12
+
+
+def _real_vessel(events: list[ClassifiedEvent]) -> str | None:
+    """Most recent (reverse-order) vessel_info among `events` that's an
+    actual vessel name, skipping NON_VESSEL_VESSEL_INFO placeholders."""
+    return next(
+        (
+            e.raw.vessel_info for e in reversed(events)
+            if e.raw.vessel_info and e.raw.vessel_info.strip().lower() not in NON_VESSEL_VESSEL_INFO
+        ),
+        None,
+    )
 
 
 def _resolve_effective_ranks(confirmed: list[ClassifiedEvent]) -> list[int]:
@@ -136,6 +182,56 @@ def infer_state(
         )
 
     dated = [e for e in events if e.date is not None]
+
+    # Exclude non-projection events dated AFTER their own scrape time
+    # from ever being treated as confirmed history. Real HL check
+    # (2026-07-22, HLXU3569327): the page includes the container's
+    # entire FUTURE route schedule - two more transshipment legs dated
+    # weeks/months ahead - using the exact same category wording as
+    # real confirmed milestones, with nothing marking them as
+    # unconfirmed. The future legs weren't even internally consistent
+    # ("Loaded" onto the next vessel dated BEFORE the prior leg's
+    # "Discharged"), confirming they're a published schedule, not
+    # history. Without this filter, "latest dated event wins" (point 1
+    # above) would jump current_phase/current_vessel straight to a leg
+    # that hasn't actually happened yet. is_projection events (MSC's
+    # "Estimated Time of Arrival") are deliberately forward-dated by
+    # design and are exempted here - they're handled entirely
+    # separately below.
+    def _is_future(e: ClassifiedEvent) -> bool:
+        if e.is_projection:
+            return False
+        # raw.is_future is a first-party carrier signal (currently only
+        # Maersk sets it - see carriers/maersk.py) and is trusted
+        # directly; the date comparison below is the fallback for
+        # carriers (HL) that don't mark this explicitly.
+        if e.raw.is_future:
+            return True
+        return e.raw.scraped_at is not None and e.date > e.raw.scraped_at
+
+    # Maersk's carrier-marked future arrival (see carriers/maersk.py):
+    # exactly one "-future" milestone per container in every real sample
+    # checked live 2026-07-29 (BSIU2815550, MRKU9415911, MRKU8437156) -
+    # the final destination-port "Vessel arrival", already carrying the
+    # real assigned vessel and a real predicted date, not a speculative
+    # multi-leg schedule the way HL's future-dated rows are. Captured
+    # from `dated` before the exclusion below removes it, so it can
+    # still feed current_eta/current_vessel further down without ever
+    # advancing current_phase/current_location past what's actually
+    # confirmed to have happened.
+    future_arrival_events = sorted(
+        (e for e in dated if e.raw.is_future and e.phase_rank in (6, 7)),
+        key=lambda e: (e.raw.scraped_at or e.date, e.date),
+    )
+
+    future_events = [e for e in dated if _is_future(e)]
+    if future_events:
+        data_quality_issues.append(
+            f"{len(future_events)} future-dated event(s) excluded from confirmed history "
+            "(scheduled, not yet occurred)"
+        )
+    dated = [e for e in dated if not _is_future(e)]
+
     # Secondary sort key: MSC's scraped dates carry no time-of-day, so
     # same-day events tie on date alone (real example: "Full Available
     # for Delivery" and "Import to consignee" both dated 2025-12-29,
@@ -183,6 +279,33 @@ def infer_state(
     if eta_events:
         eta_events.sort(key=lambda e: (e.raw.scraped_at or e.date, e.date))
         current_eta = eta_events[-1].date
+    elif future_arrival_events:
+        current_eta = future_arrival_events[-1].date
+
+    # --- current vessel: prefer the vessel already attached to the
+    # estimated_arrival projection over "whatever's on the latest
+    # confirmed event" - a container still pre-loading legitimately has
+    # no real vessel on its confirmed timeline yet (just a LADEN/EMPTY
+    # placeholder from an export-side event), even when the carrier's
+    # own ETA projection already names the real vessel assigned for the
+    # arriving leg. Real MSC check, 2026-07-22: MEDU5655981's "Estimated
+    # Time of Arrival" row (Oakland, 13/08/2026) carries vessel_info
+    # "MSC CARLOTTA MC627A" while the latest CONFIRMED event at the time
+    # was still "Export received at CY" / "LADEN" - so the ETA
+    # projection is the only place the real vessel is visible yet.
+    # MSMU2833403 (already discharged) has no ETA projection left at
+    # all by then, and its latest confirmed event ("Import Discharged
+    # from Vessel") already carries the real vessel correctly - so
+    # falling back to latest.raw.vessel_info once the projection is
+    # gone reproduces today's behavior exactly. iterated in reverse
+    # (most-recently-scraped first) since MSC's parse() can emit two
+    # estimated_arrival events for the same date - one from the page's
+    # own history block (real vessel_info) and a synthetic duplicate
+    # from the separate POD ETA element (no vessel_info) - and the
+    # duplicate, added second, would otherwise be eta_events[-1].
+    projected_vessel = _real_vessel(eta_events)
+    future_arrival_vessel = _real_vessel(future_arrival_events)
+    current_vessel = projected_vessel or future_arrival_vessel or _real_vessel(confirmed)
 
     delivery_attempt_count = sum(1 for r in effective_ranks if r in DELIVERY_ZONE_RANKS)
 
@@ -223,7 +346,7 @@ def infer_state(
         current_phase=label(latest_rank),
         current_phase_rank=latest_rank,
         current_location=latest.raw.location,
-        current_vessel=latest.raw.vessel_info,
+        current_vessel=current_vessel,
         current_eta=current_eta,
         previous_event=label(previous_rank) if previous else None,
         previous_event_date=previous.date if previous else None,

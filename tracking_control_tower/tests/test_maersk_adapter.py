@@ -121,6 +121,51 @@ class TestFullPipelineOnRealCapturedData(unittest.TestCase):
         self.assertEqual(exceptions, [])
 
 
+LIVE_CAPTURED_MRKU9415911 = json.dumps([
+    {"location": "JAIPUR / JAIPUR RAIL TERMINAL", "event": "Gate out Empty", "date": "24 Jun 2026 19:10", "future": False},
+    {"location": None, "event": "Gate in", "date": "29 Jun 2026 20:55", "future": False},
+    {"location": None, "event": "Gate out", "date": "02 Jul 2026 10:30", "future": False},
+    {"location": "PIPAVAV / PIPAVAV TERMINAL", "event": "Gate in", "date": "03 Jul 2026 22:37", "future": False},
+    {"location": None, "event": "Load on MAERSK DENVER / 627W", "date": "09 Jul 2026 07:58", "future": False},
+    {"location": None, "event": "Vessel departure (MAERSK DENVER / 627W)", "date": "09 Jul 2026 11:12", "future": False},
+    {
+        "location": "HOUSTON / BAY PORT CONTAINER TERMINAL",
+        "event": "Vessel arrival (MAERSK DENVER / 627W)",
+        "date": "14 Aug 2026 07:00",
+        "future": True,
+    },
+])
+
+
+class TestFutureFlag(unittest.TestCase):
+    """
+    Real live capture 2026-07-29 (MRKU9415911, still mid-voyage): Maersk's
+    DOM marks the final destination-port "Vessel arrival" row
+    data-test="transport-plan-item-future" - _extract_structured() reads
+    this into each row's "future" key, and parse() threads it onto
+    RawEvent.is_future (see carriers/maersk.py's module docstring).
+    """
+
+    def test_future_row_sets_is_future_true(self):
+        raw = RawPage(container="MRKU9415911", text=LIVE_CAPTURED_MRKU9415911)
+        events = MaerskAdapter().parse(raw)
+        arrival = next(e for e in events if e.raw_text.startswith("Vessel arrival"))
+        self.assertTrue(arrival.is_future)
+
+    def test_confirmed_rows_have_is_future_false(self):
+        raw = RawPage(container="MRKU9415911", text=LIVE_CAPTURED_MRKU9415911)
+        events = MaerskAdapter().parse(raw)
+        confirmed = [e for e in events if not e.raw_text.startswith("Vessel arrival")]
+        self.assertTrue(all(e.is_future is False for e in confirmed))
+
+    def test_missing_future_key_defaults_to_false(self):
+        """Rows from a fixture written before this flag existed (or any
+        other carrier's adapter) must not crash and must default safely."""
+        raw = RawPage(container="MRKU7248456", text=LIVE_CAPTURED_MRKU7248456)
+        events = MaerskAdapter().parse(raw)
+        self.assertTrue(all(e.is_future is False for e in events))
+
+
 class TestRouterIntegration(unittest.TestCase):
     def test_msk_and_maersk_prefixes_both_route_to_maersk_adapter(self):
         from tracking_control_tower.carriers.router import adapter_for_vessel

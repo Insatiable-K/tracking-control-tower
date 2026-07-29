@@ -256,5 +256,130 @@ class TestRailExpectation(unittest.TestCase):
         self.assertEqual(next_expected(8, rail_expected=True), "Rail")
 
 
+class TestCurrentVesselSkipsPlaceholders(unittest.TestCase):
+    """
+    Real bug caught 2026-07-29 re-checking fresh containers: current_vessel's
+    fallback took whatever vessel_info sat on the chronologically LATEST
+    confirmed event, even when that event's vessel_info is a non-vessel
+    placeholder (MSC's 'LADEN'/'EMPTY' container-state marker, HL's
+    'Truck'/'Rail' mode-of-transport label) rather than a real vessel name.
+    """
+
+    def _classified(self, date_str, text, vessel_info):
+        raw = RawEvent(
+            container="TEST0000007", date=datetime.fromisoformat(date_str),
+            raw_text=text, vessel_info=vessel_info,
+        )
+        return ClassifiedEvent(raw=raw, classification=classify(text))
+
+    def test_msc_delivered_container_skips_laden_marker(self):
+        """Real SEGU2963797: latest confirmed event is 'Full Available for
+        Delivery' with vessel_info='LADEN' - must fall back to the real
+        vessel on 'Import Discharged from Vessel' a few events earlier."""
+        events = [
+            self._classified("2026-06-19", "Export Loaded on Vessel", "MSC LETIZIA MC624A"),
+            self._classified("2026-07-26", "Import Discharged from Vessel", "MSC LETIZIA MC624A"),
+            self._classified("2026-07-26", "Full Available for Delivery", "LADEN"),
+        ]
+        state = infer_state("TEST0000007", events)
+        self.assertEqual(state.current_vessel, "MSC LETIZIA MC624A")
+
+    def test_hl_container_at_destination_skips_truck_marker(self):
+        """Real HLXU3569327: latest confirmed events are inland 'Gated
+        in'/'Gated out' moves at destination with vessel_info='Truck' -
+        must fall back to the real ocean vessel from 'Discharged'."""
+        events = [
+            self._classified("2026-05-31", "Loaded", "HUI FA 2622W"),
+            self._classified("2026-06-05", "Discharged", "HUI FA 2622W"),
+            self._classified("2026-06-05", "Gated out", "Truck"),
+            self._classified("2026-06-11", "Gated in", "Truck"),
+        ]
+        state = infer_state("TEST0000007", events)
+        self.assertEqual(state.current_vessel, "HUI FA 2622W")
+
+    def test_all_placeholder_vessel_info_falls_back_to_none(self):
+        """No real vessel anywhere in the confirmed history - must report
+        None, not silently surface a placeholder as if it were real."""
+        events = [
+            self._classified("2026-07-01", "Empty to Shipper", "EMPTY"),
+            self._classified("2026-07-02", "Export received at CY", "LADEN"),
+        ]
+        state = infer_state("TEST0000007", events)
+        self.assertIsNone(state.current_vessel)
+
+
+class TestMaerskFutureArrival(unittest.TestCase):
+    """
+    Maersk has no MSC-style "Estimated Time of Arrival" projection
+    phrase - instead its own DOM marks the final destination-port
+    "Vessel arrival" milestone data-test="transport-plan-item-future"
+    (carriers/maersk.py), confirmed live 2026-07-29 against real
+    containers BSIU2815550 / MRKU9415911 / MRKU8437156: always exactly
+    one such row, already carrying the real assigned vessel and a real
+    predicted date. Modeled here as RawEvent(is_future=True) since
+    that's the flag parse() sets from it.
+    """
+
+    def _raw(self, date_str, text, *, is_future=False, scraped_at="2026-07-20"):
+        from tracking_control_tower.carriers.maersk import _extract_vessel_info
+
+        return RawEvent(
+            container="MRKU0000001",
+            date=datetime.fromisoformat(date_str),
+            raw_text=text,
+            vessel_info=_extract_vessel_info(text),
+            source="Maersk",
+            scraped_at=datetime.fromisoformat(scraped_at) if scraped_at else None,
+            is_future=is_future,
+        )
+
+    def _classified(self, raw):
+        return ClassifiedEvent(raw=raw, classification=classify(raw.raw_text))
+
+    def test_future_flagged_arrival_sets_eta_and_vessel(self):
+        events = [
+            self._classified(self._raw("2026-07-09", "Load on MAERSK DENVER / 627W")),
+            self._classified(self._raw("2026-07-09", "Vessel departure (MAERSK DENVER / 627W)")),
+            self._classified(self._raw(
+                "2026-08-14", "Vessel arrival (MAERSK DENVER / 627W)", is_future=True,
+            )),
+        ]
+        state = infer_state("MRKU0000001", events)
+        self.assertEqual(state.current_eta, datetime(2026, 8, 14))
+        self.assertEqual(state.current_vessel, "MAERSK DENVER / 627W")
+
+    def test_future_flagged_arrival_does_not_advance_current_phase(self):
+        """The container hasn't actually arrived yet - current_phase must
+        still reflect the last CONFIRMED milestone (vessel departed),
+        not jump to "Arrived at port" off the future row."""
+        events = [
+            self._classified(self._raw("2026-07-09", "Load on MAERSK DENVER / 627W")),
+            self._classified(self._raw("2026-07-09", "Vessel departure (MAERSK DENVER / 627W)")),
+            self._classified(self._raw(
+                "2026-08-14", "Vessel arrival (MAERSK DENVER / 627W)", is_future=True,
+            )),
+        ]
+        state = infer_state("MRKU0000001", events)
+        self.assertEqual(state.current_phase, "Departed")
+        self.assertIn(
+            "1 future-dated event(s) excluded from confirmed history (scheduled, not yet occurred)",
+            state.data_quality_issues,
+        )
+
+    def test_unflagged_future_dated_row_is_excluded_not_used_as_eta(self):
+        """Regression guard: a plain future-dated event WITHOUT the
+        carrier's is_future flag (HL's unmarked speculative schedule
+        rows) must still be excluded from confirmed history, but must
+        NOT be resurrected as an ETA/vessel source the way a genuinely
+        carrier-flagged Maersk row is - it's unverified, not confirmed."""
+        events = [
+            self._classified(self._raw("2026-07-09", "Vessel departed MUNDRA")),
+            self._classified(self._raw("2026-08-14", "Vessel arrived NORFOLK, VA", is_future=False)),
+        ]
+        state = infer_state("MRKU0000001", events)
+        self.assertIsNone(state.current_eta)
+        self.assertEqual(state.current_phase, "Departed")
+
+
 if __name__ == "__main__":
     unittest.main()

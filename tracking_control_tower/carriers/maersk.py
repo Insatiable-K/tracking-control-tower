@@ -32,6 +32,23 @@ location is only rendered once per group of consecutive milestones at
 the same place (a display convention, not missing data) - parse()
 forward-fills it from the last seen value, the same way a human reading
 the page would.
+
+A second, easy-to-miss quirk (found 2026-07-29 investigating a report
+showing MSK containers' "current" vessel/ETA as whatever the latest
+CONFIRMED milestone said, i.e. wherever the container currently sits,
+rather than the vessel/ETA for its actual US arrival): the
+transport-plan-item <li>'s own data-test suffix is "-complete" or
+"-future", not just "transport-plan-item". Three real containers
+checked live (BSIU2815550, MRKU9415911, MRKU8437156 - early, mid, and
+late in their routes) each had exactly one "-future" row: the final
+destination-port "Vessel arrival" milestone, already carrying the real
+vessel (the container was already loaded/departed on it per the prior
+confirmed rows) and a real predicted arrival date - not a blank
+placeholder. _extract_structured() now captures this as each row's
+"future" flag, threaded onto RawEvent.is_future in parse() -
+shipment_state/engine.py uses it to source current_eta/current_vessel
+from this row without prematurely advancing current_phase to
+"arrived"/"discharged".
 """
 import json
 import re
@@ -315,6 +332,21 @@ class MaerskAdapter(CarrierAdapter):
                 items = self._driver.find_elements(By.CSS_SELECTOR, TRANSPORT_ITEM_SELECTOR)
                 structured = []
                 for item in items:
+                    # Confirmed live 2026-07-29 (BSIU2815550, MRKU9415911,
+                    # MRKU8437156): Maersk's own DOM tags each <li>
+                    # data-test="transport-plan-item-complete" or
+                    # "...-future" - exactly one "-future" row per
+                    # container in every real sample checked, always the
+                    # final destination-port "Vessel arrival" milestone,
+                    # already carrying the real assigned vessel (the
+                    # container was already loaded/departed on it) and a
+                    # real predicted arrival date. This is a first-party
+                    # "not yet happened" signal, unlike HL's future-dated
+                    # schedule rows (shipment_state/engine.py's date-based
+                    # _is_future) which carry no such marker and were found
+                    # internally inconsistent - don't conflate the two.
+                    is_future = item.get_attribute("data-test") == "transport-plan-item-future"
+
                     loc_els = item.find_elements(By.CSS_SELECTOR, LOCATION_SELECTOR)
                     location = loc_els[0].text.replace("\n", " / ").strip() if loc_els else None
 
@@ -339,7 +371,9 @@ class MaerskAdapter(CarrierAdapter):
                     if not event_text and not date_text:
                         continue
 
-                    structured.append({"location": location, "event": event_text, "date": date_text})
+                    structured.append({
+                        "location": location, "event": event_text, "date": date_text, "future": is_future,
+                    })
                 return structured
             except StaleElementReferenceException:
                 # The framework can still tear out and replace the list
@@ -395,6 +429,7 @@ class MaerskAdapter(CarrierAdapter):
                 vessel_info=_extract_vessel_info(event_text),
                 source="Maersk",
                 scraped_at=raw.scraped_at,
+                is_future=bool(row.get("future", False)),
             ))
         return events
 

@@ -20,6 +20,11 @@ class RawEvent:
     facility: str | None = None
     source: str = ""
     scraped_at: datetime | None = None
+    # Carrier's own DOM marks this milestone as not-yet-occurred, distinct
+    # from an inferred (date > scraped_at) future event - see
+    # carriers/maersk.py's is_future note. Only Maersk's adapter sets this
+    # true today; every other carrier leaves it at the default False.
+    is_future: bool = False
 
 
 @dataclass

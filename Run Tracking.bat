@@ -1,10 +1,15 @@
 @echo off
 cd /d "%~dp0"
+
 echo Running run_tracking.py from %cd%
 echo.
+
 python run_tracking.py
+
 echo.
 echo ============================================
-echo Finished (exit code %ERRORLEVEL%). Press any key to close.
+echo Finished (Exit Code: %ERRORLEVEL%)
 echo ============================================
-pause >nul
+
+timeout /t 3 /nobreak >nul
+exit
